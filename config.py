@@ -45,17 +45,17 @@ class TradingConfig:
     sampling_frequency_minutes: int = 1
 
     # ── Z-score signal thresholds ─────────────────────────────────────────────
-    rolling_window: int = 60          # 1-hour lookback
+    rolling_window: int = 120         # 2-hour lookback — filters short-term noise
     entry_zscore: float = 2.0
     exit_zscore: float = 0.0
 
     # ── Risk limits ───────────────────────────────────────────────────────────
     var_confidence: float = 0.99
     var_lookback: int = 120           # 2-hour rolling VaR window
-    max_trailing_drawdown_pct: float = -5.0   # -5 % → forced liquidation
+    max_trailing_drawdown_pct: float = -8.0   # widened: -8 % → forced liquidation
     vol_shock_window: int = 5
-    vol_shock_threshold_pct: float = 20.0     # 20 % intra-window spike
-    cool_down_bars: int = 30          # 30-minute halt post circuit-breaker
+    vol_shock_threshold_pct: float = 150.0    # only fire on extreme 150 % vol spikes
+    cool_down_bars: int = 15          # 15-minute halt post circuit-breaker
 
     # ── Simulation parameters ─────────────────────────────────────────────────
     trading_hours_per_day: int = 6
@@ -64,9 +64,10 @@ class TradingConfig:
     nifty_base_price: float = 22_000.0
     annual_drift: float = 0.08
     annual_vol: float = 0.18
-    basis_mean_reversion_speed: float = 0.35  # κ — faster = tighter spread
+    # κ=1500 ≈ 45-minute intraday half-life at 1-min bar dt=1/(252*390)
+    basis_mean_reversion_speed: float = 1500.0
     basis_long_run_mean: float = 0.0
-    basis_vol: float = 6.0            # USD spread noise
+    basis_vol: float = 12.0           # annual vol; per-bar = 12/sqrt(252*390)≈0.038 USD
 
 
 # Module-level singleton — import this everywhere else.

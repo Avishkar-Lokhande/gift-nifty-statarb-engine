@@ -18,7 +18,7 @@ import pandas as pd
 from config import CONFIG, TradingConfig
 
 
-# ── Result containers ─────────────────────────────────────────────────────────
+# ── Result containers ────────────────────────────────────────────────────────
 
 class CircuitBreakerEvent(NamedTuple):
     """Immutable record of a single circuit-breaker trigger.
@@ -81,7 +81,7 @@ class InstitutionalRiskEngine:
 
     cfg: TradingConfig = field(default_factory=lambda: CONFIG)
 
-    # ── Internal state ────────────────────────────────────────────────────────
+    # ── Internal state ───────────────────────────────────────────────────────
     _equity_history: list[float] = field(default_factory=list, init=False)
     _peak_equity: float = field(default=0.0, init=False)
     _reports: list[RiskReport] = field(default_factory=list, init=False)
@@ -106,14 +106,14 @@ class InstitutionalRiskEngine:
 
         Args:
             market_data: Enriched market DataFrame from ``MarketSimulator``.
-            equity_curve: Bar-by-bar equity curve from the strategy (first-pass,
-                          before forced exits — used for PnL attribution).
+            equity_curve: Bar-by-bar equity curve from the strategy
+                (first-pass, before forced exits — for PnL attribution).
 
         Returns:
             Tuple of:
-            - ``forced_exit_mask``: Boolean Series; ``True`` = close position now.
+            - ``forced_exit_mask``: Boolean Series; ``True`` = close now.
             - ``reports``: List of ``RiskReport`` per bar.
-            - ``circuit_events``: List of all ``CircuitBreakerEvent`` instances.
+            - ``circuit_events``: List of ``CircuitBreakerEvent`` objects.
         """
         self._reset()
         n = len(market_data)
@@ -124,6 +124,9 @@ class InstitutionalRiskEngine:
         timestamps = market_data.index
         equity_arr = equity_curve.to_numpy()
 
+        # Updated to bar index when MAX_DRAWDOWN fires, breaking the loop.
+        hard_stop_bar: int = n
+
         for i in range(n):
             ts = timestamps[i]
             equity = float(equity_arr[i])
@@ -133,12 +136,12 @@ class InstitutionalRiskEngine:
             if equity > self._peak_equity:
                 self._peak_equity = equity
 
-            # ── Compute risk metrics ──────────────────────────────────────────
+            # ── Compute risk metrics ─────────────────────────────────────────
             var_99 = self._compute_var(i, returns, equity)
             dd_pct = self._trailing_drawdown_pct(equity)
             rv_pct = float(vol5[i]) * 100.0
 
-            # ── Check circuit breakers ────────────────────────────────────────
+            # ── Check circuit breakers ───────────────────────────────────────
             is_halted = i <= self._halt_until_bar
             new_event: CircuitBreakerEvent | None = None
 
@@ -155,21 +158,40 @@ class InstitutionalRiskEngine:
                         new_event = dd_event
                         forced_exit_flags[i] = True
                         is_halted = True
+                        # Hard stop: halt all remaining bars then exit
+                        forced_exit_flags[i + 1:] = True
+                        hard_stop_bar = i
+                        self._reports.append(
+                            RiskReport(
+                                bar_idx=i,
+                                timestamp=ts,
+                                equity=equity,
+                                var_99=var_99,
+                                trailing_drawdown_pct=dd_pct,
+                                rolling_vol_pct=rv_pct,
+                                is_halted=True,
+                                circuit_event=new_event,
+                            )
+                        )
+                        break   # terminate the risk evaluation loop
             else:
-                # Still in cool-down: force exits if somehow a position slipped
+                # Still in vol-shock cool-down: keep position closed
                 forced_exit_flags[i] = True
 
-            report = RiskReport(
-                bar_idx=i,
-                timestamp=ts,
-                equity=equity,
-                var_99=var_99,
-                trailing_drawdown_pct=dd_pct,
-                rolling_vol_pct=rv_pct,
-                is_halted=is_halted,
-                circuit_event=new_event,
-            )
-            self._reports.append(report)
+            # Skip duplicate append for the bar already recorded before break
+            if i != hard_stop_bar:
+                self._reports.append(
+                    RiskReport(
+                        bar_idx=i,
+                        timestamp=ts,
+                        equity=equity,
+                        var_99=var_99,
+                        trailing_drawdown_pct=dd_pct,
+                        rolling_vol_pct=rv_pct,
+                        is_halted=is_halted,
+                        circuit_event=new_event,
+                    )
+                )
 
         forced_mask = pd.Series(forced_exit_flags, index=market_data.index)
         return forced_mask, self._reports, self._circuit_events
@@ -274,14 +296,22 @@ class InstitutionalRiskEngine:
         Returns:
             A ``CircuitBreakerEvent`` if triggered, otherwise ``None``.
         """
-        if bar_idx < self.cfg.vol_shock_window + 1:
+        _BASELINE_WINDOW = 60   # bars used to compute stable vol baseline
+        if bar_idx < _BASELINE_WINDOW:
             return None
 
-        prev_vol = float(vol5[bar_idx - 1]) * 100.0
-        if prev_vol <= 1e-9:
+        # Use the 60-bar median as a robust baseline — far more stable than
+        # comparing to the immediately preceding bar (which is itself noisy).
+        recent = vol5[bar_idx - _BASELINE_WINDOW: bar_idx]
+        baseline_vol = float(np.median(recent)) * 100.0
+
+        _VOL_FLOOR = 0.002   # 0.002 % minimum absolute level
+        if baseline_vol < _VOL_FLOOR or current_vol_pct < _VOL_FLOOR:
             return None
 
-        pct_change = ((current_vol_pct - prev_vol) / prev_vol) * 100.0
+        pct_change = (
+            (current_vol_pct - baseline_vol) / baseline_vol
+        ) * 100.0
         threshold = self.cfg.vol_shock_threshold_pct
 
         if pct_change > threshold:
