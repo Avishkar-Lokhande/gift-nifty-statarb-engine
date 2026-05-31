@@ -244,11 +244,11 @@ class BasisArbitrageStrategy:
     ) -> None:
         """Square off the open position and record the trade in the ledger.
 
-        PnL attribution:
-        - Long spread: profit when basis widens (GIFT rises relative to NSE).
-          PnL = (exit_gift - entry_gift) - (exit_nifty_usd - entry_nifty_usd)
-        - Short spread: profit when basis narrows.
-          PnL = (entry_gift - exit_gift) - (entry_nifty_usd - exit_nifty_usd)
+        PnL attribution (spread = GIFT − NSE_USD):
+        - Long spread  (Z ≤ −2): long GIFT + short NSE.
+          Profit = Δbasis × notional  (basis rises back to zero).
+        - Short spread (Z ≥ +2): short GIFT + long NSE.
+          Profit = −Δbasis × notional (basis falls back to zero).
 
         Args:
             row: Market data row at exit.
@@ -269,13 +269,15 @@ class BasisArbitrageStrategy:
         notional = pos.lots * self.cfg.lot_size
 
         if pos.direction == "long_spread":
-            # Long spread: long NSE (in USD), short GIFT
-            nse_leg_pnl = (exit_nifty_usd - entry_nifty_usd) * notional
-            gift_leg_pnl = (pos.entry_gift_price - exit_gift) * notional
-        else:
-            # Short spread: short NSE (in USD), long GIFT
+            # Z <= -2: GIFT cheap → long GIFT, short NSE (USD)
+            # Profit when spread rises back toward zero
             nse_leg_pnl = (entry_nifty_usd - exit_nifty_usd) * notional
             gift_leg_pnl = (exit_gift - pos.entry_gift_price) * notional
+        else:
+            # Z >= +2: GIFT expensive → short GIFT, long NSE (USD)
+            # Profit when spread falls back toward zero
+            nse_leg_pnl = (exit_nifty_usd - entry_nifty_usd) * notional
+            gift_leg_pnl = (pos.entry_gift_price - exit_gift) * notional
 
         gross_pnl = nse_leg_pnl + gift_leg_pnl
         net_pnl = gross_pnl - pos.transaction_cost

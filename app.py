@@ -628,8 +628,50 @@ risk_df: pd.DataFrame = res["risk_df"]
 circuit_events: list[CircuitBreakerEvent] = res["circuit_events"]
 cfg: TradingConfig = res["cfg"]
 
+kpis = _compute_kpis(equity_curve, ledger, cfg)
+
 # ─────────────────────────────────────────────────────────────────────────────
-# ① KPI Ribbon — always at the top
+# ① Top-line scorecard — st.metric() ribbon, 4 columns
+# ─────────────────────────────────────────────────────────────────────────────
+
+m1, m2, m3, m4 = st.columns(4)
+
+_ret = kpis["Total Return (%)"]
+m1.metric(
+    label="Total Net Return",
+    value=f"{_ret:+.2f}%",
+    delta=f"{'above' if _ret >= 0 else 'below'} breakeven",
+    delta_color="normal" if _ret >= 0 else "inverse",
+)
+
+_sharpe = kpis["Sharpe Ratio"]
+m2.metric(
+    label="Annualized Sharpe Ratio",
+    value=f"{_sharpe:.3f}",
+    delta="risk-adjusted return",
+    delta_color="off",
+)
+
+_dd = kpis["Max Drawdown (%)"]
+m3.metric(
+    label="Max Drawdown",
+    value=f"{_dd:.2f}%",
+    delta=f"limit: {cfg.max_trailing_drawdown_pct:.1f}%",
+    delta_color="inverse" if _dd < cfg.max_trailing_drawdown_pct else "off",
+)
+
+_trades = len(ledger)
+m4.metric(
+    label="Total Trades Executed",
+    value=f"{_trades:,}",
+    delta=f"win rate {kpis['Win Rate (%)']:.1f}%",
+    delta_color="off",
+)
+
+st.markdown("---")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ② Detailed KPI cards
 # ─────────────────────────────────────────────────────────────────────────────
 
 st.markdown(
@@ -637,7 +679,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-kpis = _compute_kpis(equity_curve, ledger, cfg)
 pct_metrics = {"Total Return (%)", "Win Rate (%)", "Max Drawdown (%)"}
 kpi_cols = st.columns(len(kpis))
 for col, (label, value) in zip(kpi_cols, kpis.items()):

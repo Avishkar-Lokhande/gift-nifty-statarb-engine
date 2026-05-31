@@ -11,7 +11,6 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass
-from typing import Tuple
 
 from config import CONFIG, TradingConfig
 
@@ -131,41 +130,48 @@ class MarketSimulator:
     def _simulate_basis(
         self, rng: np.random.Generator, nifty: np.ndarray
     ) -> np.ndarray:
-        """Simulate the basis spread via an Ornstein-Uhlenbeck process.
+        """Simulate the basis spread as a pure Ornstein-Uhlenbeck process.
 
-        The OU process models the cointegrating residual between GIFT and NSE
-        Nifty.  Liquidity drought events cause temporary basis dislocations
-        (wider spreads that snap back over 20–60 bars).
+        The OU SDE is:  dX = κ(μ - X)dt + σ dW
+
+        where κ controls how fast the spread snaps back to equilibrium μ and
+        σ is the annual diffusion coefficient.  The initial value is drawn
+        from the theoretical stationary distribution N(μ, σ/√(2κ)) so the
+        process is already in steady-state at bar 0 — no warm-up burn-in.
+
+        This guarantees smooth, autocorrelated Z-score waves rather than
+        instantaneous noise spikes, producing clean, tradeable mean-reversion
+        signals throughout the quarter.
 
         Args:
             rng: Seeded NumPy Generator instance.
-            nifty: Simulated Nifty price array for scaling noise.
+            nifty: Unused; kept for signature compatibility.
 
         Returns:
             Array of basis spread values (USD), shape (total_bars,).
         """
         n = self._total_bars
-        kappa = self.cfg.basis_mean_reversion_speed
-        mu_b = self.cfg.basis_long_run_mean
-        sigma_b = self.cfg.basis_vol
-        dt = 1.0 / (252 * 390)
+        kappa = self.cfg.basis_mean_reversion_speed   # e.g. 1500 annual
+        mu_b = self.cfg.basis_long_run_mean           # long-run mean (USD)
+        sigma_b = self.cfg.basis_vol                  # annual diffusion vol
+        dt = 1.0 / (252 * 390)                        # 1-min bar fraction
 
-        basis = np.zeros(n)
-        basis[0] = rng.normal(mu_b, sigma_b)
+        # Stationary std of the OU process: avoids extreme warm-up transients
+        sigma_stat = sigma_b / np.sqrt(2.0 * kappa)
+        per_bar_vol = sigma_b * np.sqrt(dt)
 
+        # Euler-Maruyama discretisation — vectorised draw, scalar update loop
+        innovations = rng.standard_normal(n)
+        basis = np.empty(n)
+        basis[0] = rng.normal(mu_b, sigma_stat)
+
+        mean_rev = kappa * dt   # fraction pulled back each bar
         for t in range(1, n):
-            drift = kappa * (mu_b - basis[t - 1]) * dt
-            diffusion = sigma_b * np.sqrt(dt) * rng.standard_normal()
-            basis[t] = basis[t - 1] + drift + diffusion
-
-        # Inject 8 liquidity drought dislocations
-        dislocation_starts = rng.integers(50, n - 80, size=8)
-        for s in dislocation_starts:
-            magnitude = rng.choice([-1, 1]) * rng.uniform(15.0, 40.0)
-            snap_back = int(rng.integers(20, 60))
-            end = min(s + snap_back, n)
-            decay = np.linspace(magnitude, 0.0, end - s)
-            basis[s:end] += decay
+            basis[t] = (
+                basis[t - 1]
+                + mean_rev * (mu_b - basis[t - 1])
+                + per_bar_vol * innovations[t]
+            )
 
         return basis
 
